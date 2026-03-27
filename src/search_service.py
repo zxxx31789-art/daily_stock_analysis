@@ -21,6 +21,7 @@ from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import List, Dict, Any, Optional, Tuple
 from itertools import cycle
+from urllib.parse import urlparse
 import requests
 from newspaper import Article, Config
 from tenacity import (
@@ -419,6 +420,31 @@ class SerpAPISearchProvider(BaseSearchProvider):
     
     文档：https://serpapi.com/baidu-search-api?utm_source=github_daily_stock_analysis
     """
+
+    _ORGANIC_CONTENT_FETCH_LIMIT = 1
+    _ORGANIC_CONTENT_FETCH_RANK_LIMIT = 2
+    _ORGANIC_CONTENT_FETCH_TIMEOUT = 2
+    _ORGANIC_SNIPPET_SUFFICIENT_LENGTH = 140
+    _ORGANIC_FETCHED_PREVIEW_LENGTH = 320
+    _SKIPPED_CONTENT_FETCH_SUFFIXES = (
+        ".pdf",
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".gif",
+        ".svg",
+        ".webp",
+        ".zip",
+        ".rar",
+        ".7z",
+        ".doc",
+        ".docx",
+        ".ppt",
+        ".pptx",
+        ".xls",
+        ".xlsx",
+        ".csv",
+    )
     
     def __init__(self, api_keys: List[str]):
         super().__init__(api_keys, "SerpAPI")
@@ -553,28 +579,31 @@ class SerpAPISearchProvider(BaseSearchProvider):
 
             # 4. 解析 Organic Results (自然搜索结果)
             organic_results = response.get('organic_results', [])
+            organic_content_fetch_attempts = 0
 
-            for item in organic_results[:max_results]:
+            for rank, item in enumerate(organic_results[:max_results]):
                 link = item.get('link', '')
-                snippet = item.get('snippet', '')
+                snippet = self._build_organic_snippet(item)
 
-                # 增强：如果需要，解析网页正文
-                # 策略：如果摘要太短，或者为了获取更多信息，可以请求网页
-                # 这里我们对所有结果尝试获取正文，但为了性能，仅获取前1000字符
-                content = ""
-                if link:
-                   try:
-                       fetched_content = fetch_url_content(link, timeout=5)
-                       if fetched_content:
-                           # 如果获取到了正文，将其拼接到 snippet 中，或者替换 snippet
-                           # 这里选择拼接，保留原摘要
-                           content = fetched_content
-                           if len(content) > 500:
-                               snippet = f"{snippet}\n\n【网页详情】\n{content[:500]}..."
-                           else:
-                               snippet = f"{snippet}\n\n【网页详情】\n{content}"
-                   except Exception as e:
-                       logger.debug(f"[SerpAPI] Fetch content failed: {e}")
+                if self._should_fetch_organic_content(
+                    link=link,
+                    snippet=snippet,
+                    rank=rank,
+                    fetched_count=organic_content_fetch_attempts,
+                ):
+                    organic_content_fetch_attempts += 1
+                    try:
+                        fetched_content = fetch_url_content(
+                            link,
+                            timeout=self._ORGANIC_CONTENT_FETCH_TIMEOUT,
+                        )
+                        if fetched_content:
+                            snippet = self._merge_organic_snippet_with_content(
+                                snippet,
+                                fetched_content,
+                            )
+                    except Exception as e:
+                        logger.debug(f"[SerpAPI] Fetch content failed: {e}")
 
                 results.append(SearchResult(
                     title=item.get('title', ''),
@@ -605,11 +634,89 @@ class SerpAPISearchProvider(BaseSearchProvider):
     def _extract_domain(url: str) -> str:
         """从 URL 提取域名"""
         try:
-            from urllib.parse import urlparse
             parsed = urlparse(url)
             return parsed.netloc.replace('www.', '') or '未知来源'
         except Exception:
             return '未知来源'
+
+    @classmethod
+    def _normalize_organic_text(cls, value: Any) -> str:
+        """标准化 SerpAPI organic 文本字段。"""
+        return re.sub(r"\s+", " ", str(value or "")).strip()
+
+    @classmethod
+    def _extract_rich_snippet_extensions(cls, item: Dict[str, Any]) -> List[str]:
+        """提取 rich_snippet 中已有的结构化摘要，优先复用 API 原始返回。"""
+        rich_snippet = item.get("rich_snippet") or {}
+        extensions: List[str] = []
+        seen: set[str] = set()
+
+        for section in ("top", "bottom"):
+            section_data = rich_snippet.get(section) or {}
+            for raw_value in section_data.get("extensions") or []:
+                value = cls._normalize_organic_text(raw_value)
+                if not value or value in seen:
+                    continue
+                seen.add(value)
+                extensions.append(value)
+
+        return extensions
+
+    @classmethod
+    def _build_organic_snippet(cls, item: Dict[str, Any]) -> str:
+        """构建 organic result 摘要，尽量先消费 SerpAPI 已返回的信息。"""
+        snippet = cls._normalize_organic_text(item.get("snippet", ""))
+        rich_extensions = cls._extract_rich_snippet_extensions(item)
+
+        if rich_extensions:
+            rich_text = " | ".join(rich_extensions)
+            if rich_text and rich_text not in snippet:
+                snippet = f"{snippet}\n{rich_text}".strip() if snippet else rich_text
+
+        return snippet
+
+    @classmethod
+    def _should_fetch_organic_content(
+        cls,
+        *,
+        link: str,
+        snippet: str,
+        rank: int,
+        fetched_count: int,
+    ) -> bool:
+        """仅对极少量高位且摘要明显不足的结果补抓正文。"""
+        if fetched_count >= cls._ORGANIC_CONTENT_FETCH_LIMIT:
+            return False
+
+        if rank >= cls._ORGANIC_CONTENT_FETCH_RANK_LIMIT:
+            return False
+
+        if len(snippet) >= cls._ORGANIC_SNIPPET_SUFFICIENT_LENGTH:
+            return False
+
+        if not link or not link.startswith(("http://", "https://")):
+            return False
+
+        parsed_link = urlparse(link)
+        if parsed_link.scheme not in {"http", "https"}:
+            return False
+
+        return not parsed_link.path.lower().endswith(cls._SKIPPED_CONTENT_FETCH_SUFFIXES)
+
+    @classmethod
+    def _merge_organic_snippet_with_content(cls, snippet: str, content: str) -> str:
+        """用较短正文预览补强 snippet，避免拉长单次搜索耗时和返回体积。"""
+        preview = cls._normalize_organic_text(content)[:cls._ORGANIC_FETCHED_PREVIEW_LENGTH]
+        if not preview:
+            return snippet
+
+        if len(content) > cls._ORGANIC_FETCHED_PREVIEW_LENGTH:
+            preview = f"{preview}..."
+
+        if snippet:
+            return f"{snippet}\n\n【网页详情】\n{preview}"
+
+        return f"【网页详情】\n{preview}"
 
 
 class BochaSearchProvider(BaseSearchProvider):
