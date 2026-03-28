@@ -276,6 +276,10 @@ def test_sanitize_llm_log_preview_redacts_quoted_x_api_key_fields(raw_preview, e
     [
         ("OPENAI_API_KEY=sk-live-123456", "OPENAI_API_KEY=[REDACTED]"),
         ('GEMINI_API_KEY="sk-live-123456"', 'GEMINI_API_KEY="[REDACTED]"'),
+        ("AIHUBMIX_KEY=sk-live-123456", "AIHUBMIX_KEY=[REDACTED]"),
+        ("GEMINI_API_KEYS=key1,key2", "GEMINI_API_KEYS=[REDACTED]"),
+        ("OPENAI_API_KEYS=key1,key2", "OPENAI_API_KEYS=[REDACTED]"),
+        ("ANTHROPIC_API_KEYS=key1,key2", "ANTHROPIC_API_KEYS=[REDACTED]"),
         ("id_token=xyz", "id_token=[REDACTED]"),
     ],
 )
@@ -286,6 +290,23 @@ def test_sanitize_llm_log_preview_redacts_provider_prefixed_api_key_assignments(
 
     assert preview == expected_preview
     assert "sk-live-123456" not in preview
+
+
+@pytest.mark.parametrize(
+    ("raw_preview", "expected_preview"),
+    [
+        ('{"AIHUBMIX_KEY":"sk-live-123456"}', '{"AIHUBMIX_KEY":"[REDACTED]"}'),
+        ('{"GEMINI_API_KEYS":"key1,key2"}', '{"GEMINI_API_KEYS":"[REDACTED]"}'),
+    ],
+)
+def test_sanitize_llm_log_preview_redacts_provider_prefixed_api_key_json_fields(
+    raw_preview, expected_preview
+):
+    preview = _sanitize_llm_log_preview(raw_preview)
+
+    assert preview == expected_preview
+    assert "sk-live-123456" not in preview
+    assert "key1,key2" not in preview
 
 
 def test_sanitize_llm_log_preview_redacts_provider_prefixed_secret_fields():
