@@ -54,6 +54,11 @@ describe('LLMChannelEditor', () => {
     );
 
     const primaryModelSelect = screen.getByRole('combobox', { name: '主模型' });
+    const agentModelSelect = screen.getByRole('combobox', { name: 'Agent 主模型' });
+    const visionModelSelect = screen.getByRole('combobox', { name: 'Vision 模型' });
+
     expect(within(primaryModelSelect).getByRole('option', { name: 'minimax/MiniMax-M1' })).toBeInTheDocument();
+    expect(within(agentModelSelect).getByRole('option', { name: 'minimax/MiniMax-M1' })).toBeInTheDocument();
+    expect(within(visionModelSelect).getByRole('option', { name: 'minimax/MiniMax-M1' })).toBeInTheDocument();
   });
 });
