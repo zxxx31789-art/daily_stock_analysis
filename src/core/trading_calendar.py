@@ -104,7 +104,9 @@ def get_open_markets_today() -> Set[str]:
         Set of market keys ('cn', 'hk', 'tw', 'us') that are trading today
     """
     if not _XCALS_AVAILABLE:
-        return {"cn", "hk", "us"}
+        # Fail-open: when exchange-calendars is unavailable, treat all configured
+        # markets as open so per-market filtering does not skip supported regions.
+        return set(MARKET_TIMEZONE)
     result: Set[str] = set()
     from zoneinfo import ZoneInfo
     for mkt, tz_name in MARKET_TIMEZONE.items():

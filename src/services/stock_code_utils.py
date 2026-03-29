@@ -38,7 +38,7 @@ def _strip_exchange_prefix(text: str) -> Optional[str]:
 
 
 def _strip_exchange_suffix(text: str) -> Optional[str]:
-    """Strip exchange suffix (.SH/.SZ/.SS/.HK) and return normalized bare digits, or None."""
+    """Strip a supported exchange suffix and return the normalized code, or None."""
     for suffix, digit_lens in _SUFFIX_DIGIT_LENS.items():
         if text.endswith(suffix):
             base = text[: -len(suffix)].strip()

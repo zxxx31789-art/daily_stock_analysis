@@ -9,9 +9,9 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
+from tests.litellm_stub import ensure_litellm_stub
 
-if "litellm" not in sys.modules:
-    sys.modules["litellm"] = MagicMock()
+ensure_litellm_stub()
 if "json_repair" not in sys.modules:
     sys.modules["json_repair"] = MagicMock()
 if "newspaper" not in sys.modules:
@@ -22,7 +22,12 @@ if "newspaper" not in sys.modules:
 
 from data_provider.base import DataFetcherManager, canonical_stock_code, normalize_stock_code
 from data_provider.yfinance_fetcher import YfinanceFetcher
-from src.core.trading_calendar import MARKET_EXCHANGE, get_market_for_stock
+from src.core.trading_calendar import (
+    MARKET_EXCHANGE,
+    MARKET_TIMEZONE,
+    get_market_for_stock,
+    get_open_markets_today,
+)
 from src.market_context import detect_market, get_market_guidelines
 from src.search_service import SearchResponse, SearchResult, SearchService
 
@@ -98,6 +103,10 @@ class TaiwanMarketContextTestCase(unittest.TestCase):
         self.assertEqual(MARKET_EXCHANGE["tw"], "XTAI")
         self.assertEqual(get_market_for_stock("2330"), "tw")
         self.assertEqual(get_market_for_stock("2330.TW"), "tw")
+
+    def test_trading_calendar_fail_open_includes_tw_market(self) -> None:
+        with patch("src.core.trading_calendar._XCALS_AVAILABLE", False):
+            self.assertEqual(get_open_markets_today(), set(MARKET_TIMEZONE))
 
 
 class TaiwanSearchQueryTestCase(unittest.TestCase):
