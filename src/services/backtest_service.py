@@ -211,16 +211,57 @@ class BacktestService:
             "errors": errors,
         }
 
-    def get_recent_evaluations(self, *, code: Optional[str], eval_window_days: Optional[int] = None, limit: int = 50, page: int = 1) -> Dict[str, Any]:
+    def get_recent_evaluations(
+        self,
+        *,
+        code: Optional[str],
+        eval_window_days: Optional[int] = None,
+        limit: int = 50,
+        page: int = 1,
+        analysis_date_from: Optional[date] = None,
+        analysis_date_to: Optional[date] = None,
+    ) -> Dict[str, Any]:
         offset = max(page - 1, 0) * limit
-        rows, total = self.repo.get_results_paginated(code=code, eval_window_days=eval_window_days, days=None, offset=offset, limit=limit)
-        items = [self._result_to_dict(r) for r in rows]
+        rows, total = self.repo.get_results_paginated(
+            code=code,
+            eval_window_days=eval_window_days,
+            analysis_date_from=analysis_date_from,
+            analysis_date_to=analysis_date_to,
+            days=None,
+            offset=offset,
+            limit=limit,
+        )
+        items = [self._result_to_dict(result, stock_name, trend_prediction) for result, stock_name, trend_prediction, _ in rows]
         return {"total": total, "page": page, "limit": limit, "items": items}
 
-    def get_summary(self, *, scope: str, code: Optional[str], eval_window_days: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    def get_summary(
+        self,
+        *,
+        scope: str,
+        code: Optional[str],
+        eval_window_days: Optional[int] = None,
+        analysis_date_from: Optional[date] = None,
+        analysis_date_to: Optional[date] = None,
+    ) -> Optional[Dict[str, Any]]:
         config = get_config()
         engine_version = str(getattr(config, "backtest_engine_version", "v1"))
         lookup_code = OVERALL_SENTINEL_CODE if scope == "overall" else code
+
+        if analysis_date_from is not None or analysis_date_to is not None:
+            rows = self.repo.list_results(
+                code=code,
+                eval_window_days=eval_window_days,
+                analysis_date_from=analysis_date_from,
+                analysis_date_to=analysis_date_to,
+            )
+            return self._build_dynamic_summary(
+                rows=rows,
+                scope=scope,
+                code=lookup_code,
+                eval_window_days=eval_window_days,
+                engine_version=engine_version,
+            )
+
         summary = self.repo.get_summary(
             scope=scope,
             code=lookup_code,
@@ -361,22 +402,30 @@ class BacktestService:
         )
 
     @staticmethod
-    def _result_to_dict(row: BacktestResult) -> Dict[str, Any]:
+    def _result_to_dict(
+        row: BacktestResult,
+        stock_name: Optional[str] = None,
+        trend_prediction: Optional[str] = None,
+    ) -> Dict[str, Any]:
         return {
             "analysis_history_id": row.analysis_history_id,
             "code": row.code,
+            "stock_name": stock_name,
             "analysis_date": row.analysis_date.isoformat() if row.analysis_date else None,
             "eval_window_days": row.eval_window_days,
             "engine_version": row.engine_version,
             "eval_status": row.eval_status,
             "evaluated_at": row.evaluated_at.isoformat() if row.evaluated_at else None,
             "operation_advice": row.operation_advice,
+            "trend_prediction": trend_prediction,
             "position_recommendation": row.position_recommendation,
             "start_price": row.start_price,
             "end_close": row.end_close,
             "max_high": row.max_high,
             "min_low": row.min_low,
             "stock_return_pct": row.stock_return_pct,
+            "actual_return_pct": row.stock_return_pct,
+            "actual_movement": BacktestService._actual_movement_from_return(row.stock_return_pct),
             "direction_expected": row.direction_expected,
             "direction_correct": row.direction_correct,
             "outcome": row.outcome,
@@ -447,3 +496,44 @@ class BacktestService:
             return float(value) / 100.0
         except (TypeError, ValueError):
             return default
+
+    @staticmethod
+    def _actual_movement_from_return(value: Optional[float]) -> Optional[str]:
+        if value is None:
+            return None
+        try:
+            actual_return = float(value)
+        except (TypeError, ValueError):
+            return None
+        if actual_return > 0:
+            return "up"
+        if actual_return < 0:
+            return "down"
+        return "flat"
+
+    @staticmethod
+    def _build_dynamic_summary(
+        *,
+        rows: List[BacktestResult],
+        scope: str,
+        code: Optional[str],
+        eval_window_days: Optional[int],
+        engine_version: str,
+    ) -> Dict[str, Any]:
+        if eval_window_days is not None:
+            summary_window_days = int(eval_window_days)
+        elif rows:
+            summary_window_days = int(rows[0].eval_window_days)
+        else:
+            summary_window_days = int(getattr(get_config(), "backtest_eval_window_days", 10))
+
+        summary = BacktestEngine.compute_summary(
+            results=rows,
+            scope=scope,
+            code=code,
+            eval_window_days=summary_window_days,
+            engine_version=engine_version,
+        )
+        summary["code"] = None if summary.get("code") == OVERALL_SENTINEL_CODE else summary.get("code")
+        summary["computed_at"] = datetime.now().isoformat()
+        return summary

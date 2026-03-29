@@ -97,31 +97,68 @@ class BacktestRepository:
         *,
         code: Optional[str],
         eval_window_days: Optional[int] = None,
+        analysis_date_from: Optional[date] = None,
+        analysis_date_to: Optional[date] = None,
         days: Optional[int],
         offset: int,
         limit: int,
-    ) -> Tuple[List[BacktestResult], int]:
+    ) -> Tuple[List[Tuple[BacktestResult, Optional[str], Optional[str], Optional[datetime]]], int]:
         with self.db.get_session() as session:
-            conditions = []
-            if code:
-                conditions.append(BacktestResult.code == code)
-            if eval_window_days is not None:
-                conditions.append(BacktestResult.eval_window_days == eval_window_days)
-            if days:
-                cutoff = datetime.now() - timedelta(days=int(days))
-                conditions.append(BacktestResult.evaluated_at >= cutoff)
+            conditions = self._build_result_conditions(
+                code=code,
+                eval_window_days=eval_window_days,
+                analysis_date_from=analysis_date_from,
+                analysis_date_to=analysis_date_to,
+                days=days,
+            )
 
             where_clause = and_(*conditions) if conditions else True
 
-            total = session.execute(select(func.count(BacktestResult.id)).where(where_clause)).scalar() or 0
+            total = session.execute(
+                select(func.count(BacktestResult.id))
+                .select_from(BacktestResult)
+                .join(AnalysisHistory, AnalysisHistory.id == BacktestResult.analysis_history_id)
+                .where(where_clause)
+            ).scalar() or 0
+            rows = session.execute(
+                select(
+                    BacktestResult,
+                    AnalysisHistory.name,
+                    AnalysisHistory.trend_prediction,
+                    AnalysisHistory.created_at,
+                )
+                .join(AnalysisHistory, AnalysisHistory.id == BacktestResult.analysis_history_id)
+                .where(where_clause)
+                .order_by(desc(BacktestResult.analysis_date), desc(BacktestResult.evaluated_at))
+                .offset(offset)
+                .limit(limit)
+            ).all()
+            return list(rows), int(total)
+
+    def list_results(
+        self,
+        *,
+        code: Optional[str],
+        eval_window_days: Optional[int] = None,
+        analysis_date_from: Optional[date] = None,
+        analysis_date_to: Optional[date] = None,
+        days: Optional[int] = None,
+    ) -> List[BacktestResult]:
+        with self.db.get_session() as session:
+            conditions = self._build_result_conditions(
+                code=code,
+                eval_window_days=eval_window_days,
+                analysis_date_from=analysis_date_from,
+                analysis_date_to=analysis_date_to,
+                days=days,
+            )
+            where_clause = and_(*conditions) if conditions else True
             rows = session.execute(
                 select(BacktestResult)
                 .where(where_clause)
-                .order_by(desc(BacktestResult.evaluated_at))
-                .offset(offset)
-                .limit(limit)
+                .order_by(desc(BacktestResult.analysis_date), desc(BacktestResult.evaluated_at))
             ).scalars().all()
-            return list(rows), int(total)
+            return list(rows)
 
     def upsert_summary(self, summary: BacktestSummary) -> None:
         """Insert or replace summary row by unique key."""
@@ -219,3 +256,26 @@ class BacktestRepository:
             return datetime.strptime(str(date_str)[:10], "%Y-%m-%d").date()
         except Exception:
             return None
+
+    @staticmethod
+    def _build_result_conditions(
+        *,
+        code: Optional[str],
+        eval_window_days: Optional[int],
+        analysis_date_from: Optional[date],
+        analysis_date_to: Optional[date],
+        days: Optional[int],
+    ) -> List[object]:
+        conditions = []
+        if code:
+            conditions.append(BacktestResult.code == code)
+        if eval_window_days is not None:
+            conditions.append(BacktestResult.eval_window_days == eval_window_days)
+        if analysis_date_from is not None:
+            conditions.append(BacktestResult.analysis_date >= analysis_date_from)
+        if analysis_date_to is not None:
+            conditions.append(BacktestResult.analysis_date <= analysis_date_to)
+        if days:
+            cutoff = datetime.now() - timedelta(days=int(days))
+            conditions.append(BacktestResult.evaluated_at >= cutoff)
+        return conditions
