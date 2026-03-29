@@ -11,10 +11,14 @@ Discord 平台适配器
 """
 
 import logging
-from typing import Dict, Any, Optional
+from datetime import datetime
+from typing import Dict, Any, Optional, Tuple, List
+
+from nacl.exceptions import BadSignatureError
+from nacl.signing import VerifyKey
 
 from bot.platforms.base import BotPlatform
-from bot.models import BotMessage, WebhookResponse
+from bot.models import BotMessage, WebhookResponse, ChatType
 
 
 logger = logging.getLogger(__name__)
@@ -22,6 +26,14 @@ logger = logging.getLogger(__name__)
 
 class DiscordPlatform(BotPlatform):
     """Discord 平台适配器"""
+
+    def __init__(self):
+        from src.config import get_config
+
+        config = get_config()
+        self._interactions_public_key = (
+            getattr(config, "discord_interactions_public_key", None) or ""
+        ).strip()
     
     @property
     def platform_name(self) -> str:
@@ -42,9 +54,54 @@ class DiscordPlatform(BotPlatform):
         Returns:
             签名是否有效
         """
-        # TODO: 实现 Discord Webhook 签名验证
-        # 当前暂时返回 True，后续需要完善
+        if not self._interactions_public_key:
+            logger.warning("[Discord] 未配置 interactions public key，拒绝请求")
+            return False
+
+        normalized_headers = {str(k).lower(): v for k, v in headers.items()}
+        signature = normalized_headers.get("x-signature-ed25519", "")
+        timestamp = normalized_headers.get("x-signature-timestamp", "")
+
+        if not signature or not timestamp:
+            logger.warning("[Discord] 缺少签名头，拒绝请求")
+            return False
+
+        try:
+            verify_key = VerifyKey(bytes.fromhex(self._interactions_public_key))
+            signature_bytes = bytes.fromhex(signature)
+        except ValueError:
+            logger.warning("[Discord] 公钥或签名不是合法十六进制，拒绝请求")
+            return False
+        except Exception as exc:
+            logger.warning("[Discord] 无法加载签名公钥: %s", exc)
+            return False
+
+        try:
+            verify_key.verify(timestamp.encode("utf-8") + body, signature_bytes)
+        except BadSignatureError:
+            logger.warning("[Discord] 签名验证失败")
+            return False
+        except Exception as exc:
+            logger.warning("[Discord] 签名校验异常: %s", exc)
+            return False
+
         return True
+
+    def handle_webhook(
+        self,
+        headers: Dict[str, str],
+        body: bytes,
+        data: Dict[str, Any],
+    ) -> Tuple[Optional[BotMessage], Optional[WebhookResponse]]:
+        """Discord 需要先验签，再处理 ping/challenge。"""
+        if not self.verify_request(headers, body):
+            return None, WebhookResponse.error("Invalid Discord signature", 401)
+
+        challenge_response = self.handle_challenge(data)
+        if challenge_response:
+            return None, challenge_response
+
+        return self.parse_message(data), None
     
     def parse_message(self, data: Dict[str, Any]) -> Optional[BotMessage]:
         """解析 Discord 消息为统一格式
@@ -55,63 +112,49 @@ class DiscordPlatform(BotPlatform):
         Returns:
             BotMessage 对象，或 None（不需要处理）
         """
-        # 检查是否是消息事件
-        if data.get("type") != 1 and data.get("type") != 2:
+        interaction_type = data.get("type")
+        if interaction_type != 2:
             return None
-        
-        # 提取消息内容
-        content = data.get("content", "").strip()
+
+        interaction_data = data.get("data", {})
+        content = self._build_command_content(interaction_data)
         if not content:
             return None
-        
-        # 提取用户信息
-        author = data.get("author", {})
-        user_id = author.get("id", "")
+
+        author = (
+            data.get("user")
+            or (data.get("member") or {}).get("user")
+            or data.get("author", {})
+        )
+        user_id = str(author.get("id") or "")
         user_name = author.get("username", "unknown")
-        
-        # 提取频道信息
-        channel_id = data.get("channel_id", "")
-        guild_id = data.get("guild_id", "")
-        
-        # 提取消息 ID
-        message_id = data.get("id", "")
-        
-        # 提取附件信息（如果有）
-        attachments = data.get("attachments", [])
-        attachment_urls = [att["url"] for att in attachments if "url" in att]
-        
-        # 构建 BotMessage 对象
-        message = BotMessage(
-            platform="discord",
-            message_id=message_id,
+        channel_id = str(data.get("channel_id") or "")
+        guild_id = str(data.get("guild_id") or "")
+
+        if guild_id:
+            chat_type = ChatType.GROUP
+        elif channel_id:
+            chat_type = ChatType.PRIVATE
+        else:
+            chat_type = ChatType.UNKNOWN
+
+        return BotMessage(
+            platform=self.platform_name,
+            message_id=str(data.get("id") or ""),
             user_id=user_id,
             user_name=user_name,
+            chat_id=channel_id or guild_id or user_id,
+            chat_type=chat_type,
             content=content,
-            attachment_urls=attachment_urls,
-            channel_id=channel_id,
-            group_id=guild_id,
-            # 从 data 中提取其他相关信息
-            timestamp=data.get("timestamp"),
-            mention_everyone=data.get("mention_everyone", False),
-            mentions=data.get("mentions", []),
-            
-            # 添加 Discord 特定的原始数据
+            raw_content=content,
+            mentioned=False,
+            mentions=[],
+            timestamp=self._parse_timestamp(data.get("timestamp")),
             raw_data={
-                "message_id": message_id,
-                "channel_id": channel_id,
-                "guild_id": guild_id,
-                "author": author,
-                "content": content,
-                "timestamp": data.get("timestamp"),
-                "attachments": attachments,
-                "mentions": data.get("mentions", []),
-                "mention_roles": data.get("mention_roles", []),
-                "mention_everyone": data.get("mention_everyone", False),
-                "type": data.get("type"),
-            }
+                **data,
+                "_interaction_name": interaction_data.get("name", ""),
+            },
         )
-        
-        return message
     
     def format_response(self, response: Any, message: BotMessage) -> WebhookResponse:
         """将统一响应转换为 Discord 格式
@@ -159,3 +202,48 @@ class DiscordPlatform(BotPlatform):
             })
         
         return None
+
+    def _build_command_content(self, interaction_data: Dict[str, Any]) -> str:
+        command_name = str(interaction_data.get("name", "")).strip()
+        if not command_name:
+            return ""
+
+        parts = [f"/{command_name}"]
+        self._append_option_parts(parts, interaction_data.get("options", []))
+        return " ".join(parts).strip()
+
+    def _append_option_parts(self, parts: List[str], options: Any) -> None:
+        if not isinstance(options, list):
+            return
+
+        for option in options:
+            if not isinstance(option, dict):
+                continue
+
+            nested_options = option.get("options")
+            if nested_options:
+                nested_name = str(option.get("name", "")).strip()
+                if nested_name:
+                    parts.append(nested_name)
+                self._append_option_parts(parts, nested_options)
+                continue
+
+            value = option.get("value")
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                parts.append(str(value).lower())
+            else:
+                parts.append(str(value))
+
+    def _parse_timestamp(self, value: Any) -> datetime:
+        if not value:
+            return datetime.now()
+
+        if isinstance(value, datetime):
+            return value
+
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return datetime.now()
