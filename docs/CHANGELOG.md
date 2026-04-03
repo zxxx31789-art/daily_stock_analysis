@@ -25,10 +25,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] Agent SSE 流清理阶段静默吞掉后台执行器异常 — 流结束时后台任务异常现在正确记录并上报，避免错误无法感知（fixes #969）
 - [文档] FAQ 补充 Ollama `OllamaException / APIConnectionError` 连接失败排障条目（Q12c），覆盖服务未启动、URL 配置错误、模型前缀缺失、模型未下载、远程防火墙等 5 个检查点
 - [修复] 技能加载异常被静默吞没问题 — 在 ask.py、skills/aggregator.py、skills/router.py 的静默 except 块补充 logger.warning 日志，确保技能列表为空时有日志可查（fixes #970）
-- [修复] A 股新闻中文优先链路新增股票上下文命中判断：`search_stock_news()` 现在会把明确提到当前股票代码/名称的结果排在前面，并在首个 provider 只返回中文但明显不相关的海外资讯时继续尝试后续引擎
-- [修复] A 股新闻检索现在会将 `600519.SH` / `SH600519` / `SZ000001` 等 canonical/prefix 代码归一化为沪深 6 位代码，再参与中文优先与股票上下文判断，避免前端传入 canonicalCode 时仍被英文或海外资讯占满
-- [修复] A 股多维度情报搜索现在也会沿用中文 locale 与股票上下文优先策略；`search_comprehensive_intel()` 在 Brave 路径下不再返回偏海外的默认结果，并会在首个 provider 明显跑题时继续尝试后续引擎
-- [修复] A 股中文优先新闻与情报搜索在所有 provider 都未命中当前股票上下文时不再回退展示首批海外无关结果，统一改为空结果 fail-open，避免报告被跑题资讯占满
 
 ## [3.12.0] - 2026-04-01
 

@@ -38,8 +38,6 @@ from src.config import (
     normalize_news_strategy_profile,
     resolve_news_window_days,
 )
-from src.data.stock_mapping import STOCK_NAME_MAP
-from src.services.stock_code_utils import normalize_code
 
 logger = logging.getLogger(__name__)
 
@@ -1930,11 +1928,6 @@ class SearchService:
     FUTURE_TOLERANCE_DAYS = 1
     _CHINESE_TEXT_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
     _US_STOCK_RE = re.compile(r"^[A-Za-z]{1,5}(\.[A-Za-z])?$")
-    _OBVIOUSLY_OFF_TOPIC_NEWS_RE = re.compile(
-        r"(美股|纳斯达克|道琼斯|标普|海外|美国|欧股|日股|韩股|三大指数|通胀|科技股|芯片股|盘前|盘后"
-        r"|nasdaq|dow|s&p|u\\.s\\.|us market|inflation|pre-market|after-hours|chip stocks?)",
-        re.IGNORECASE,
-    )
 
     def __init__(
         self,
@@ -2079,17 +2072,9 @@ class SearchService:
             return True
         if cls._contains_chinese_text(stock_name):
             return True
-        # Positive A-stock identification: 6-digit mainland symbols, including
-        # canonical/prefixed forms such as 600519.SH / SH600519.
-        code = cls._normalize_stock_code(stock_code)
+        # Positive A-stock identification: 6-digit numeric codes (e.g. 600519)
+        code = (stock_code or "").strip()
         return code.isdigit() and len(code) == 6
-
-    @staticmethod
-    def _normalize_stock_code(stock_code: str) -> str:
-        """Normalize common exchange-decorated codes into a stable comparison key."""
-        raw_code = (stock_code or "").strip()
-        normalized = normalize_code(raw_code)
-        return (normalized or raw_code).strip().upper()
 
     @classmethod
     def _is_chinese_news_result(cls, item: SearchResult) -> bool:
@@ -2097,101 +2082,20 @@ class SearchService:
         return cls._contains_chinese_text(" ".join(filter(None, [item.title, item.snippet, item.source])))
 
     @classmethod
-    def _is_obviously_off_topic_news_result(cls, item: SearchResult) -> bool:
-        """Detect clearly unrelated overseas or market-wide headlines."""
-        text = " ".join(filter(None, [item.title, item.snippet, item.source, item.url]))
-        if not text:
-            return False
-        return bool(cls._OBVIOUSLY_OFF_TOPIC_NEWS_RE.search(text))
-
-    @classmethod
-    def _should_drop_off_topic_fallback(cls, response: SearchResponse) -> bool:
-        """Only drop fallback batches when every item looks clearly off-topic."""
-        return bool(response.results) and all(
-            cls._is_obviously_off_topic_news_result(item) for item in response.results
-        )
-
-    @classmethod
-    def _matches_stock_news_context(
-        cls,
-        item: SearchResult,
-        *,
-        stock_code: str,
-        stock_name: str,
-    ) -> bool:
-        """Check whether a news item explicitly mentions the target stock."""
-        text = " ".join(filter(None, [item.title, item.snippet, item.source, item.url]))
-        if not text:
-            return False
-
-        lower_text = text.lower()
-        raw_code = (stock_code or "").strip()
-        if not raw_code:
-            return False
-
-        normalized_code = cls._normalize_stock_code(raw_code).lower()
-        candidate_names = []
-        normalized_name = (stock_name or "").strip().lower()
-        if normalized_name:
-            candidate_names.append(normalized_name)
-        mapped_name = (STOCK_NAME_MAP.get(normalized_code.upper()) or "").strip().lower()
-        if mapped_name and mapped_name not in candidate_names:
-            candidate_names.append(mapped_name)
-
-        for candidate_name in candidate_names:
-            if candidate_name in lower_text:
-                return True
-
-        code_variants = {raw_code.lower(), normalized_code}
-        if normalized_code.isdigit():
-            if len(normalized_code) == 6:
-                code_variants.update(
-                    {
-                        f"sh{normalized_code}",
-                        f"sz{normalized_code}",
-                        f"{normalized_code}.sh",
-                        f"{normalized_code}.sz",
-                        f"{normalized_code}.ss",
-                    }
-                )
-            elif len(normalized_code) == 5:
-                code_variants.update({f"hk{normalized_code}", f"{normalized_code}.hk"})
-
-        for variant in code_variants:
-            if re.search(rf"(?<![a-z0-9]){re.escape(variant)}(?![a-z0-9])", lower_text):
-                return True
-
-        return False
-
-    @classmethod
     def _prioritize_news_language(
         cls,
         response: SearchResponse,
         *,
         prefer_chinese: bool,
-        stock_code: str,
-        stock_name: str,
-    ) -> Tuple[SearchResponse, int, int]:
-        """Reorder results by stock-context match and preferred language."""
+    ) -> Tuple[SearchResponse, int]:
+        """Reorder results by preferred language and return preferred-result count."""
         if not prefer_chinese or not response.success or not response.results:
-            return response, 0, 0
+            return response, 0
 
-        matched_chinese_results: List[SearchResult] = []
-        matched_other_results: List[SearchResult] = []
         chinese_results: List[SearchResult] = []
         other_results: List[SearchResult] = []
         for item in response.results:
-            matches_context = cls._matches_stock_news_context(
-                item,
-                stock_code=stock_code,
-                stock_name=stock_name,
-            )
-            is_chinese = cls._is_chinese_news_result(item)
-            if matches_context and is_chinese:
-                matched_chinese_results.append(item)
-            elif matches_context:
-                matched_other_results.append(item)
-            elif is_chinese:
+            if cls._is_chinese_news_result(item):
                 chinese_results.append(item)
             else:
                 other_results.append(item)
@@ -2199,19 +2103,13 @@ class SearchService:
         return (
             SearchResponse(
                 query=response.query,
-                results=(
-                    matched_chinese_results
-                    + matched_other_results
-                    + chinese_results
-                    + other_results
-                ),
+                results=chinese_results + other_results,
                 provider=response.provider,
                 success=response.success,
                 error_message=response.error_message,
                 search_time=response.search_time,
             ),
-            len(matched_chinese_results),
-            len(matched_chinese_results) + len(matched_other_results),
+            len(chinese_results),
         )
 
     @classmethod
@@ -2220,18 +2118,14 @@ class SearchService:
         candidate: SearchResponse,
         *,
         candidate_preferred_count: int,
-        candidate_context_match_count: int,
         best_response: Optional[SearchResponse],
         best_preferred_count: int,
-        best_context_match_count: int,
     ) -> bool:
-        """Prefer responses with more matched Chinese items, then more matched items."""
+        """Prefer responses with more Chinese items, then more total items."""
         if best_response is None:
             return True
         if candidate_preferred_count != best_preferred_count:
             return candidate_preferred_count > best_preferred_count
-        if candidate_context_match_count != best_context_match_count:
-            return candidate_context_match_count > best_context_match_count
         return len(candidate.results) > len(best_response.results)
 
     @classmethod
@@ -2706,9 +2600,8 @@ class SearchService:
             # 依次尝试各个搜索引擎（若过滤后为空，继续尝试下一引擎）
             had_provider_success = False
             fallback_response: Optional[SearchResponse] = None
-            best_contextual_response: Optional[SearchResponse] = None
+            best_preferred_response: Optional[SearchResponse] = None
             best_preferred_count = 0
-            best_context_match_count = 0
             for provider in self._providers:
                 if not provider.is_available:
                     continue
@@ -2734,35 +2627,15 @@ class SearchService:
                 had_provider_success = had_provider_success or bool(response.success)
 
                 if filtered_response.success and filtered_response.results:
-                    prioritized_response, _, _ = self._prioritize_news_language(
+                    prioritized_response, preferred_count = self._prioritize_news_language(
                         filtered_response,
                         prefer_chinese=prefer_chinese,
-                        stock_code=stock_code,
-                        stock_name=stock_name,
                     )
                     limited_response = self._limit_search_response(
                         prioritized_response,
                         max_results=max_results,
                     )
-                    visible_preferred_count = sum(
-                        1
-                        for item in limited_response.results
-                        if self._is_chinese_news_result(item)
-                        and self._matches_stock_news_context(
-                            item,
-                            stock_code=stock_code,
-                            stock_name=stock_name,
-                        )
-                    )
-                    visible_context_match_count = sum(
-                        1
-                        for item in limited_response.results
-                        if self._matches_stock_news_context(
-                            item,
-                            stock_code=stock_code,
-                            stock_name=stock_name,
-                        )
-                    )
+                    visible_preferred_count = min(preferred_count, len(limited_response.results))
 
                     if not prefer_chinese:
                         logger.info(f"使用 {provider.name} 搜索成功")
@@ -2772,40 +2645,28 @@ class SearchService:
                     if fallback_response is None:
                         fallback_response = limited_response
 
-                    if visible_context_match_count == 0:
-                        logger.info(
-                            "%s 搜索成功但结果未命中 %s(%s) 上下文，继续尝试下一引擎",
-                            provider.name,
-                            stock_name,
-                            stock_code,
-                        )
-                        continue
-
-                    if self._is_better_preferred_news_response(
-                        limited_response,
-                        candidate_preferred_count=visible_preferred_count,
-                        candidate_context_match_count=visible_context_match_count,
-                        best_response=best_contextual_response,
-                        best_preferred_count=best_preferred_count,
-                        best_context_match_count=best_context_match_count,
-                    ):
-                        best_contextual_response = limited_response
-                        best_preferred_count = visible_preferred_count
-                        best_context_match_count = visible_context_match_count
-
                     if visible_preferred_count > 0:
                         logger.info(
-                            "%s 搜索成功，识别到 %s/%s 条命中当前股票上下文的中文新闻",
+                            "%s 搜索成功，识别到 %s/%s 条中文新闻",
                             provider.name,
                             visible_preferred_count,
                             len(limited_response.results),
                         )
+                        if self._is_better_preferred_news_response(
+                            limited_response,
+                            candidate_preferred_count=visible_preferred_count,
+                            best_response=best_preferred_response,
+                            best_preferred_count=best_preferred_count,
+                        ):
+                            best_preferred_response = limited_response
+                            best_preferred_count = visible_preferred_count
+
                         if visible_preferred_count >= max_results:
                             self._put_cache(cache_key, limited_response)
                             return limited_response
                     else:
                         logger.info(
-                            "%s 搜索成功且命中股票上下文，但结果仍以英文为主，继续尝试下一引擎",
+                            "%s 搜索成功但结果仍以英文为主，继续尝试下一引擎",
                             provider.name,
                         )
                 else:
@@ -2822,20 +2683,10 @@ class SearchService:
                         )
 
             if prefer_chinese:
-                if best_contextual_response is not None:
-                    self._put_cache(cache_key, best_contextual_response)
-                    return best_contextual_response
-                if fallback_response is not None:
-                    if self._should_drop_off_topic_fallback(fallback_response):
-                        logger.info(
-                            "中文优先新闻搜索未命中 %s(%s) 股票上下文，丢弃 %s 条明显跑题的候选结果",
-                            stock_name,
-                            stock_code,
-                            len(fallback_response.results),
-                        )
-                    else:
-                        self._put_cache(cache_key, fallback_response)
-                        return fallback_response
+                best_to_return = best_preferred_response or fallback_response
+                if best_to_return is not None:
+                    self._put_cache(cache_key, best_to_return)
+                    return best_to_return
 
             if had_provider_success:
                 return SearchResponse(
@@ -2934,7 +2785,6 @@ class SearchService:
 
         is_foreign = self._is_foreign_stock(stock_code)
         is_index_etf = self.is_index_or_etf(stock_code, stock_name)
-        prefer_chinese = self._should_prefer_chinese_news(stock_code, stock_name)
 
         if is_foreign:
             search_dimensions = [
@@ -3070,207 +2920,49 @@ class SearchService:
             available_providers = [p for p in self._providers if p.is_available]
             if not available_providers:
                 break
-
-            start_index = provider_index % len(available_providers)
+            
+            provider = available_providers[provider_index % len(available_providers)]
             provider_index += 1
-            provider_candidates = (
-                available_providers[start_index:] + available_providers[:start_index]
-            )
+            
+            logger.info(f"[情报搜索] {dim['desc']}: 使用 {provider.name}")
 
-            selected_response: Optional[SearchResponse] = None
-            fallback_response: Optional[SearchResponse] = None
-            best_contextual_response: Optional[SearchResponse] = None
-            best_preferred_count = 0
-            best_context_match_count = 0
-            last_response: Optional[SearchResponse] = None
-            last_processed_response: Optional[SearchResponse] = None
-            had_provider_success = False
-
-            for candidate_index, provider in enumerate(provider_candidates):
-                logger.info(
-                    "[情报搜索] %s: 使用 %s%s",
-                    dim['desc'],
-                    provider.name,
-                    "（回退）" if candidate_index > 0 else "",
-                )
-
-                search_kwargs: Dict[str, Any] = {}
-                if isinstance(provider, TavilySearchProvider) and dim.get('tavily_topic'):
-                    search_kwargs["topic"] = dim['tavily_topic']
-                elif isinstance(provider, BraveSearchProvider):
-                    search_kwargs.update(
-                        self._brave_search_locale(
-                            stock_code,
-                            prefer_chinese=prefer_chinese,
-                        )
-                    )
-
+            if isinstance(provider, TavilySearchProvider) and dim.get('tavily_topic'):
                 response = provider.search(
                     dim['query'],
                     max_results=provider_max_results,
                     days=search_days,
-                    **search_kwargs,
+                    topic=dim['tavily_topic'],
                 )
-                had_provider_success = had_provider_success or bool(response.success)
-                last_response = response
-                if dim['strict_freshness']:
-                    filtered_response = self._filter_news_response(
-                        response,
-                        search_days=search_days,
-                        max_results=target_per_dimension,
-                        log_scope=f"{stock_code}:{provider.name}:{dim['name']}",
-                    )
-                else:
-                    filtered_response = self._normalize_and_limit_response(
-                        response,
-                        max_results=target_per_dimension,
-                    )
-                last_processed_response = filtered_response
-
-                if not prefer_chinese:
-                    if response.success:
-                        selected_response = filtered_response
-                        break
-                    logger.warning(
-                        "[情报搜索] %s: %s 搜索失败 - %s",
-                        dim['desc'],
-                        provider.name,
-                        response.error_message,
-                    )
-                    continue
-
-                if filtered_response.success and filtered_response.results:
-                    prioritized_response, _, _ = self._prioritize_news_language(
-                        filtered_response,
-                        prefer_chinese=prefer_chinese,
-                        stock_code=stock_code,
-                        stock_name=stock_name,
-                    )
-                    limited_response = self._limit_search_response(
-                        prioritized_response,
-                        max_results=target_per_dimension,
-                    )
-                    visible_preferred_count = sum(
-                        1
-                        for item in limited_response.results
-                        if self._is_chinese_news_result(item)
-                        and self._matches_stock_news_context(
-                            item,
-                            stock_code=stock_code,
-                            stock_name=stock_name,
-                        )
-                    )
-                    visible_context_match_count = sum(
-                        1
-                        for item in limited_response.results
-                        if self._matches_stock_news_context(
-                            item,
-                            stock_code=stock_code,
-                            stock_name=stock_name,
-                        )
-                    )
-
-                    if fallback_response is None:
-                        fallback_response = limited_response
-
-                    if visible_context_match_count == 0:
-                        logger.info(
-                            "[情报搜索] %s: %s 返回结果未命中 %s(%s) 上下文，继续尝试下一引擎",
-                            dim['desc'],
-                            provider.name,
-                            stock_name,
-                            stock_code,
-                        )
-                        continue
-
-                    if self._is_better_preferred_news_response(
-                        limited_response,
-                        candidate_preferred_count=visible_preferred_count,
-                        candidate_context_match_count=visible_context_match_count,
-                        best_response=best_contextual_response,
-                        best_preferred_count=best_preferred_count,
-                        best_context_match_count=best_context_match_count,
-                    ):
-                        best_contextual_response = limited_response
-                        best_preferred_count = visible_preferred_count
-                        best_context_match_count = visible_context_match_count
-
-                    if visible_preferred_count > 0:
-                        selected_response = limited_response
-                        break
-
-                    logger.info(
-                        "[情报搜索] %s: %s 已命中股票上下文，但中文结果不足，继续尝试下一引擎",
-                        dim['desc'],
-                        provider.name,
-                    )
-                    continue
-
-                if response.success:
-                    logger.info(
-                        "[情报搜索] %s: %s 搜索成功但过滤后无有效结果，继续尝试下一引擎",
-                        dim['desc'],
-                        provider.name,
-                    )
-                else:
-                    logger.warning(
-                        "[情报搜索] %s: %s 搜索失败 - %s",
-                        dim['desc'],
-                        provider.name,
-                        response.error_message,
-                    )
-
-            final_response = selected_response
-            if prefer_chinese and final_response is None:
-                if best_contextual_response is not None:
-                    final_response = best_contextual_response
-                elif fallback_response is not None:
-                    if self._should_drop_off_topic_fallback(fallback_response):
-                        logger.info(
-                            "[情报搜索] %s: 中文优先但未命中 %s(%s) 股票上下文，丢弃 %s 条明显跑题的候选结果",
-                            dim['desc'],
-                            stock_name,
-                            stock_code,
-                            len(fallback_response.results),
-                        )
-                        final_response = SearchResponse(
-                            query=dim['query'],
-                            results=[],
-                            provider="Filtered",
-                            success=True,
-                            error_message=None,
-                        )
-                    else:
-                        final_response = fallback_response
-                elif had_provider_success:
-                    final_response = SearchResponse(
-                        query=dim['query'],
-                        results=[],
-                        provider="Filtered",
-                        success=True,
-                        error_message=None,
-                    )
-            if final_response is None:
-                final_response = last_processed_response or last_response or SearchResponse(
-                    query=dim['query'],
-                    results=[],
-                    provider="None",
-                    success=False,
-                    error_message="所有搜索引擎都不可用或搜索失败",
+            else:
+                response = provider.search(
+                    dim['query'],
+                    max_results=provider_max_results,
+                    days=search_days,
                 )
-
-            results[dim['name']] = final_response
+            if dim['strict_freshness']:
+                filtered_response = self._filter_news_response(
+                    response,
+                    search_days=search_days,
+                    max_results=target_per_dimension,
+                    log_scope=f"{stock_code}:{provider.name}:{dim['name']}",
+                )
+            else:
+                filtered_response = self._normalize_and_limit_response(
+                    response,
+                    max_results=target_per_dimension,
+                )
+            results[dim['name']] = filtered_response
             search_count += 1
             
-            if final_response.success:
+            if response.success:
                 logger.info(
                     "[情报搜索] %s: 原始=%s条, 过滤后=%s条",
                     dim['desc'],
-                    len(last_response.results) if last_response else 0,
-                    len(final_response.results),
+                    len(response.results),
+                    len(filtered_response.results),
                 )
             else:
-                logger.warning(f"[情报搜索] {dim['desc']}: 搜索失败 - {final_response.error_message}")
+                logger.warning(f"[情报搜索] {dim['desc']}: 搜索失败 - {response.error_message}")
             
             # 短暂延迟避免请求过快
             time.sleep(0.5)
