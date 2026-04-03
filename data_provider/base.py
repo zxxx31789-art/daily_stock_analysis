@@ -15,6 +15,7 @@
 """
 
 import logging
+import re
 import random
 import time
 from threading import BoundedSemaphore, RLock, Thread
@@ -1004,6 +1005,18 @@ class DataFetcherManager:
                 # 继续尝试下一个数据源
                 continue
         
+        # 5-digit bare code starting with '0': when the HK lookup returns empty,
+        # retry with a leading-zero padded A-share candidate (e.g. '02714' → '002714').
+        # Only triggers for plain 5-digit codes; explicit HK prefixes (e.g. 'HK02714')
+        # are already normalized out of this pattern.
+        if re.match(r"^0\d{4}$", stock_code):
+            padded = "0" + stock_code
+            logger.info("[5位裸码兜底] %s 全部数据源无数据，尝试补零为 A 股候选码 %s", stock_code, padded)
+            try:
+                return self.get_daily_data(padded, start_date=start_date, end_date=end_date, days=days)
+            except DataFetchError:
+                pass  # fall through to original error
+
         # 所有数据源都失败
         error_summary = f"所有数据源获取 {stock_code} 失败:\n" + "\n".join(errors)
         elapsed = time.time() - request_start
