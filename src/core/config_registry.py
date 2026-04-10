@@ -1563,7 +1563,7 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
     },
     "AGENT_MAX_STEPS": {
         "title": "Agent Max Steps",
-        "description": "Maximum reasoning-step ceiling for Agent mode. In orchestrator mode, each sub-agent keeps min(its default, this limit) so lower-default specialists are not inflated.",
+        "description": "Maximum reasoning-step limit for Agent mode. At the default (10), each sub-agent keeps its own preset. When raised above 10, all sub-agents adopt this value.",
         "category": "agent",
         "data_type": "integer",
         "ui_control": "number",
