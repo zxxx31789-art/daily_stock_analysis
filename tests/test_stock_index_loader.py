@@ -64,6 +64,43 @@ class TestStockIndexLoader(unittest.TestCase):
                 self.assertEqual(stock_index_loader.get_stock_name_index_map(), {})
                 self.assertIsNone(stock_index_loader.get_index_stock_name("000001"))
 
+    def test_get_stock_name_index_map_skips_invalid_utf8_and_uses_next_candidate(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            invalid_path = Path(temp_dir) / "invalid-stocks.index.json"
+            valid_path = Path(temp_dir) / "stocks.index.json"
+            invalid_path.write_bytes(b"\xff\xfe\xfd")
+            valid_path.write_text(
+                json.dumps([["000001.SZ", "000001", "平安银行"]], ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                stock_index_loader,
+                "get_stock_index_candidate_paths",
+                return_value=(invalid_path, valid_path),
+            ):
+                self.assertEqual(stock_index_loader.get_index_stock_name("000001"), "平安银行")
+
+    def test_get_stock_name_index_map_skips_unexpected_json_shape_and_uses_next_candidate(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            malformed_path = Path(temp_dir) / "malformed-stocks.index.json"
+            valid_path = Path(temp_dir) / "stocks.index.json"
+            malformed_path.write_text(
+                json.dumps({"code": "000001", "name": "平安银行"}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            valid_path.write_text(
+                json.dumps([["000001.SZ", "000001", "平安银行"]], ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                stock_index_loader,
+                "get_stock_index_candidate_paths",
+                return_value=(malformed_path, valid_path),
+            ):
+                self.assertEqual(stock_index_loader.get_index_stock_name("000001"), "平安银行")
+
 
 if __name__ == "__main__":
     unittest.main()

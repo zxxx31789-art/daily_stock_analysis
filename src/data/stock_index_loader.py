@@ -65,6 +65,11 @@ def _load_stock_index_file(index_path: Path) -> Dict[str, str]:
     with index_path.open("r", encoding="utf-8") as fh:
         raw_items = json.load(fh)
 
+    if not isinstance(raw_items, list):
+        raise ValueError(
+            f"Unexpected {_STOCK_INDEX_FILENAME} payload type: {type(raw_items).__name__}"
+        )
+
     stock_name_map: Dict[str, str] = {}
     for item in raw_items:
         if not isinstance(item, list) or len(item) < 3:
@@ -103,7 +108,7 @@ def get_stock_name_index_map() -> Dict[str, str]:
                     len(_STOCK_INDEX_CACHE),
                 )
                 return _STOCK_INDEX_CACHE
-            except (OSError, json.JSONDecodeError) as exc:
+            except (OSError, TypeError, ValueError) as exc:
                 logger.debug("[股票名称] 读取股票索引失败 %s: %s", candidate_path, exc)
 
         _STOCK_INDEX_CACHE = {}
