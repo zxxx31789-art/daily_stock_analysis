@@ -8,7 +8,6 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import pytest
 from tests.litellm_stub import ensure_litellm_stub
 
 ensure_litellm_stub()
@@ -169,3 +168,15 @@ def test_pipeline_logs_disabled_realtime_once_without_fetching_quote(caplog):
         if "历史收盘价继续分析" in record.message
     ]
     assert downgrade_logs == ["贵州茅台(600519) 实时行情已禁用，使用历史收盘价继续分析"]
+
+
+def test_pipeline_trend_lookup_normalizes_prefixed_stock_code():
+    pipeline = _make_pipeline(enable_realtime_quote=False, realtime_quote=None)
+    pipeline.config.agent_mode = True
+    pipeline.db.get_data_range.side_effect = [[], []]
+    pipeline._analyze_with_agent = MagicMock(return_value=None)
+
+    pipeline.analyze_stock("SH600519", ReportType.SIMPLE, "q1")
+
+    first_call = pipeline.db.get_data_range.call_args_list[0]
+    assert first_call.args[0] == "600519"

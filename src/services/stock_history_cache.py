@@ -128,6 +128,10 @@ def _resolve_expected_target_date(stock_code: str, target_date: Optional[date] =
 def _has_sufficient_history(bars: List[object], requested_days: int, expected_target_date: date) -> bool:
     if len(bars) < requested_days:
         return False
+    return _is_history_fresh(bars, expected_target_date)
+
+
+def _is_history_fresh(bars: List[object], expected_target_date: date) -> bool:
     latest_bar_date = _get_latest_bar_date(bars)
     if latest_bar_date is None:
         return False
@@ -261,7 +265,10 @@ def ensure_min_history_cached(
     if not force_refresh:
         if _has_sufficient_history(existing_bars, requested_days, expected_target_date):
             return True, existing_source
-        if attempt_state.successful_days >= requested_days:
+        if attempt_state.successful_days >= requested_days and _is_history_fresh(
+            existing_bars,
+            expected_target_date,
+        ):
             return True, existing_source
         if attempt_state.attempted_days >= requested_days and attempt_state.last_error:
             return False, attempt_state.last_error
@@ -277,7 +284,10 @@ def ensure_min_history_cached(
         if not force_refresh:
             if _has_sufficient_history(existing_bars, requested_days, expected_target_date):
                 return True, existing_source
-            if attempt_state.successful_days >= requested_days:
+            if attempt_state.successful_days >= requested_days and _is_history_fresh(
+                existing_bars,
+                expected_target_date,
+            ):
                 return True, existing_source
             if attempt_state.attempted_days >= requested_days and attempt_state.last_error:
                 return False, attempt_state.last_error
